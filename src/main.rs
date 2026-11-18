@@ -4,7 +4,7 @@
 use std::{env, io};
 use std::env::set_current_dir;
 use std::io::{Write};
-use std::process::Command;
+use std::process::{Command, Output};
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -56,11 +56,17 @@ fn main () {
                         }
                     },
                     _ => {
-                        let output = Command::new(command).args(args).spawn().unwrap().wait_with_output();
-                        print!("{}", str::from_utf8(&*match output {
-                            Ok(..) => {output.unwrap().stdout},
-                            Err(..) => { output.unwrap().stderr }
-                        }).unwrap());
+                        let spawn = Command::new(command).args(args).spawn();
+                        let output: Output;
+                        match spawn {
+                            Ok(..) => {
+                                output = spawn.unwrap().wait_with_output().unwrap();
+                                print! ("{}", String::from_utf8(output.stdout).unwrap());
+                            },
+                            Err(..) => {
+                                println! ("{}", spawn.unwrap_err());
+                            }
+                        }
                     }
                 }
             }
