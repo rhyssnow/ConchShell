@@ -2,15 +2,16 @@
 #![allow(non_snake_case)]
 
 use std::{env, io};
+use std::env::set_current_dir;
 use std::io::{Read, Write};
 use std::process::Command;
 
 fn main (){
-    let mut env = env::home_dir().unwrap();
+    set_current_dir(env::home_dir().unwrap()).unwrap();
     let mut input = String::new();
 
     loop {
-        print!("{} > ", env.to_str().unwrap());
+        print!("{} > ", env::current_dir().unwrap().display());
         io::stdout().flush().unwrap();
 
         input.clear();
@@ -20,7 +21,12 @@ fn main (){
 
                 let (command, args) = parse(input);
                 input = String::new();
-                print!("{}", str::from_utf8(&*Command::new(command).args(args).output().unwrap().stdout).unwrap());
+
+                let output = Command::new(command).args(args).output();
+                print!("{}", str::from_utf8(&*match output {
+                    Ok(..) => {output.unwrap().stdout},
+                    Err(..) => { Vec::from("The command you entered was not valid\n") }
+                }).unwrap());
             }
             Err(_) => {
                 print!("Error reading input");
@@ -37,10 +43,10 @@ fn parse (input: String) -> (String, Vec<String>)  {
 
     for character in input.chars() {
         if !commandFound {
-            command.push(character);
-             if character == ' ' {
+            if character == ' ' {
                 commandFound = true;
             }
+            command.push(character);
         }
         else {
             if character != ' ' {
@@ -67,5 +73,5 @@ fn parse (input: String) -> (String, Vec<String>)  {
 
     arguments.append(&mut argumentPush);
 
-    (command, arguments)
+    (command.trim().to_string(), arguments)
 }
