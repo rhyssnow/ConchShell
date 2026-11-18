@@ -3,7 +3,7 @@
 
 use std::{env, io};
 use std::env::set_current_dir;
-use std::io::{Read, Write};
+use std::io::{Write};
 use std::process::Command;
 
 fn main (){
@@ -22,10 +22,10 @@ fn main (){
                 let (command, args) = parse(input);
                 input = String::new();
 
-                let output = Command::new(command).args(args).output();
+                let output = Command::new(command).args(args).spawn().unwrap().wait_with_output();
                 print!("{}", str::from_utf8(&*match output {
                     Ok(..) => {output.unwrap().stdout},
-                    Err(..) => { Vec::from("The command you entered was not valid\n") }
+                    Err(..) => { Vec::from("The command you entered is not valid\n") }
                 }).unwrap());
             }
             Err(_) => {
