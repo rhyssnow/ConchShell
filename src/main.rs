@@ -6,7 +6,7 @@ use std::env::set_current_dir;
 use std::io::{Write};
 use std::process::Command;
 
-fn main (){
+fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
     let mut input = String::new();
 
@@ -22,11 +22,47 @@ fn main (){
                 let (command, args) = parse(input);
                 input = String::new();
 
-                let output = Command::new(command).args(args).spawn().unwrap().wait_with_output();
-                print!("{}", str::from_utf8(&*match output {
-                    Ok(..) => {output.unwrap().stdout},
-                    Err(..) => { Vec::from("The command you entered is not valid\n") }
-                }).unwrap());
+                match command.as_str() {
+                    "cd" => {
+                        if args.len() > 1 {
+                            println!("Too many arguments.");
+                        } else if args.len() == 0 {
+                            set_current_dir(env::home_dir().unwrap()).unwrap();
+                        }
+                        else {
+                            let mut newDir = env::current_dir().unwrap();
+                            newDir.push(args[0].clone());
+                            if newDir.exists() {
+                                set_current_dir(newDir).unwrap();
+                            }
+                        }
+                    },
+                    "exit" => {
+                        if args.len() > 1 {
+                            println!("Too many arguments.");
+                        }
+                        else if args.len() == 0 {
+                            std::process::exit(0);
+                        }
+                        else {
+                            match args[0].parse::<i32>() {
+                                Ok(_) => {
+                                    std::process::exit(args[0].parse::<i32>().unwrap());
+                                },
+                                Err(_) => {
+                                    println!("Invalid argument. Not a number.");
+                                }
+                            }
+                        }
+                    },
+                    _ => {
+                        let output = Command::new(command).args(args).spawn().unwrap().wait_with_output();
+                        print!("{}", str::from_utf8(&*match output {
+                            Ok(..) => {output.unwrap().stdout},
+                            Err(..) => { output.unwrap().stderr }
+                        }).unwrap());
+                    }
+                }
             }
             Err(_) => {
                 print!("Error reading input");
@@ -40,6 +76,7 @@ fn parse (input: String) -> (String, Vec<String>)  {
     let mut arguments = Vec::new();
     let mut argument = String::new();
     let mut commandFound = false;
+    let mut string = false;
 
     for character in input.chars() {
         if !commandFound {
@@ -49,10 +86,13 @@ fn parse (input: String) -> (String, Vec<String>)  {
             command.push(character);
         }
         else {
-            if character != ' ' {
+            if character == "'".chars().nth(0).unwrap() {
+                string = !string;
+            }
+            if (character != ' ' || string) && character !=  "'".chars().nth(0).unwrap(){
                 argument.push(character);
             }
-            else if argument.len() > 0 {
+            else if argument.len() > 0  && !string{
                 arguments.push(argument);
                 argument = String::new();
             }
@@ -63,10 +103,12 @@ fn parse (input: String) -> (String, Vec<String>)  {
     }
     let mut argumentPush = Vec::new();
     for argument in arguments.iter_mut() {
-        if argument.chars().nth(0).unwrap() == '-' && argument.chars().nth(1).unwrap() != '-' && argument.len() > 1 {
-            for _ in 0..argument.len()-2 {
-                argumentPush.push("-".to_string()+&argument.chars().nth(1).unwrap().to_string());
-                argument.remove(1);
+        if argument.len() > 1 {
+            if argument.chars().nth(0).unwrap() == '-' && argument.chars().nth(1).unwrap() != '-' && argument.len() > 1 {
+                for _ in 0..argument.len() - 2 {
+                    argumentPush.push("-".to_string() + &argument.chars().nth(1).unwrap().to_string());
+                    argument.remove(1);
+                }
             }
         }
     }
