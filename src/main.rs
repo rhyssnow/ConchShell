@@ -3,8 +3,8 @@
 
 use std::{env, io};
 use std::env::set_current_dir;
-use std::io::{ Write};
-use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Output, Stdio};
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -19,15 +19,33 @@ fn main () {
             Ok(_) => {
                 input = input.trim().to_string();
 
-                let processes = parse(input);
+                let mut piped = false;
+
+                let processes = parse(input, &mut piped);
                 input = String::new();
 
-                let mut output = String::new();
-                let mut error = String::new();
-                for (command, args) in processes {
-                    executeCommand(command, args, &mut output, &mut error);
+                if !piped {
+                    let mut output = String::new();
+                    let mut error = String::new();
+                    let (command, args) = processes[0].clone();
+                    if !builtIns(command.clone(), args.clone(), &mut output, &mut error) {
+                        executeCommand(command, args, &mut output, &mut error);
+                    }
+                    print!("{}", output);
+                    print!("{}", error);
                 }
-                print!("{}", output);
+                else {
+                    let mut output = String::new();
+                    let mut error = String::new();
+
+                    for (command, args) in processes.iter() {
+                        if !builtIns(command.clone(), args.clone(), &mut output, &mut error) {
+                            executeCommandPiped(command.clone(), args.clone(), &mut output, &mut error);
+                        }
+                    }
+                    print!("{}", output);
+                    print!("{}", error);
+                }
             }
             Err(_) => {
                 print!("Error reading input");
@@ -36,13 +54,14 @@ fn main () {
     }
 }
 
-fn parse (input: String) -> Vec<(String, Vec<String>)>  {
+fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>)>  {
     let mut command = String::new();
     let mut arguments = Vec::new();
     let mut argument = String::new();
     let mut commandFound = false;
     let mut string = false;
     let mut process: Vec<(String, Vec<String>)> = Vec::new();
+    *piped = false;
 
     for character in input.chars() {
         if !commandFound {
@@ -63,6 +82,7 @@ fn parse (input: String) -> Vec<(String, Vec<String>)>  {
                 command = String::new();
                 argument = String::new();
                 arguments = Vec::new();
+                *piped = true;
             }
             else if character != ' ' || string {
                 argument.push(character);
@@ -94,42 +114,34 @@ fn parse (input: String) -> Vec<(String, Vec<String>)>  {
     process
 }
 
-fn builtIns (command: String, args : Vec<String>, error: &mut bool) -> bool {
+fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error: &mut String) -> bool{
     match command.as_str() {
         "cd" => {
             if args.len() > 1 {
-                println!("Too many arguments");
-                *error = true;
+                *error = "Too many arguments".to_string();
             } else if args.len() == 0 {
                 set_current_dir(env::home_dir().unwrap()).unwrap();
-                *error = false;
             } else {
                 let mut newDir = env::current_dir().unwrap();
                 newDir.push(args[0].clone());
                 if newDir.exists() {
                     set_current_dir(newDir).unwrap();
                 }
-                *error = false;
-
             }
             true
         },
         "exit" => {
             if args.len() > 1 {
-                println!("Too many arguments");
-                *error = true;
+                *error = "Too many arguments".to_string();
             } else if args.len() == 0 {
-                *error = false;
                 std::process::exit(0);
             } else {
                 match args[0].parse::<i32>() {
                     Ok(_) => {
-                        *error = false;
                         std::process::exit(args[0].parse::<i32>().unwrap());
                     },
                     Err(_) => {
-                        println!("Invalid argument: {}", args[0]);
-                        *error = true;
+                        *error = "Invalid argumend: ".to_string()+ args[0].as_str();
                     }
                 }
             }
@@ -141,19 +153,82 @@ fn builtIns (command: String, args : Vec<String>, error: &mut bool) -> bool {
     }
 }
 
-fn executeCommand (command: String, args : Vec<String>, prevStdin: &mut String, error: &mut String) {
-    let command = Command::new(command.clone()).args(args.clone()).stdout(Stdio::piped()).stdin(Stdio::piped()).spawn();
+fn executeCommand (command: String, args : Vec<String>, stdOutput: &mut String, error: &mut String) {
+    let spawn = Command::new(command).args(args).spawn();
+    let output: Output;
+    match spawn {
+        Ok(..) => {
+            output = spawn.unwrap().wait_with_output().unwrap();
+            *stdOutput = String::from_utf8(output.stdout).unwrap();
+        },
+        Err(..) => {
+            *error = spawn.unwrap_err().to_string();
+        }
+    }
+}
+
+fn executeCommandPiped (command: String, args : Vec<String>, prevStdin: &mut String, error: &mut String) {
+    let command = Command::new(command.clone()).args(args.clone()).stdout(Stdio::piped()).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let mut command = match command {
-        Ok(..) => command.unwrap(),
+        Ok(command) => command,
         Err(..) => {*error = command.unwrap_err().to_string() + "\n";
         return;},
     };
+
+    let stdout = command.stdout.take().unwrap();
+    let stderr = command.stderr.take().unwrap();
+
+    let outThread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let mut output: String = String::new();
+
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+                Err(..) => {
+                    eprintln!("Error reading stdout");
+                }
+            }
+        }
+        return output;
+    });
+
+    let errThread = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut output: String = String::new();
+
+        for line in reader.lines() {
+            match line {
+                Ok(line) => {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+                Err(..) => {
+                    eprintln!("Error reading stdout");
+                }
+            }
+        }
+        return output;
+    });
+
+    let mut stdin = command.stdin.take().unwrap();
+
     if !prevStdin.is_empty() {
-        let mut stdin = command.stdin.take().unwrap();
         stdin.write_all(prevStdin.as_bytes()).unwrap();
+        stdin.flush().unwrap();
+        drop(stdin);
     }
 
-    *prevStdin = String::from_utf8(command.wait_with_output().unwrap().stdout).unwrap();
-    *error = "".to_string();
+    let status = command.wait().unwrap();
+    if !status.success() {
+        eprintln!("{}", status);
+    }
+
+
+    *prevStdin = outThread.join().unwrap();
+    *error = errThread.join().unwrap();
 
 }
