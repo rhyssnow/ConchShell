@@ -1,12 +1,10 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env, fs, io};
+use std::{env, io};
 use std::env::set_current_dir;
-use std::fs::File;
-use std::io::{Read, Stdin, Stdout, Write};
-use std::os::fd::AsRawFd;
-use std::process::{Command, Output, Stdio};
+use std::io::{ Write};
+use std::process::{Command, Stdio};
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -30,12 +28,12 @@ fn main () {
                     let command = processes[0].0.clone();
                     let args = processes[0].1.clone();
                     if !builtIns(command.clone(), args.clone()) {
-                        print!("{}", executeCommand(command, args));
+                        print!("{}", executeCommand(command, args,"".to_string()));
                     }
                 } else {
                     let mut output = String::new();
                     for (command, args) in processes {
-                        output = executeCommandPipe(command, args, output);
+                        output = executeCommand(command, args, output);
                     }
                     print!("{}", output);
                 }
@@ -144,21 +142,8 @@ fn builtIns (command: String, args : Vec<String>) -> bool {
         }
     }
 }
-fn executeCommand (command: String, args: Vec<String>) -> String {
-    let spawn = Command::new(command).args(args).spawn();
-    let output: Output;
-    match spawn {
-        Ok(..) => {
-            output = spawn.unwrap().wait_with_output().unwrap();
-            String::from_utf8(output.stdout).unwrap()
-        },
-        Err(..) => {
-            spawn.unwrap_err().to_string()
-        }
-    }
-}
 
-fn executeCommandPipe (command: String, args : Vec<String>, prevStdin: String) -> String {
+fn executeCommand (command: String, args : Vec<String>, prevStdin: String) -> String {
     let command = Command::new(command.clone()).args(args.clone()).stdout(Stdio::piped()).stdin(Stdio::piped()).spawn();
     let mut command = match command {
         Ok(..) => command.unwrap(),
@@ -169,9 +154,5 @@ fn executeCommandPipe (command: String, args : Vec<String>, prevStdin: String) -
         stdin.write_all(prevStdin.as_bytes()).unwrap();
     }
 
-    let mut returnVal = String::new();
-
-    command.stdout.unwrap().read_to_string(&mut returnVal).unwrap().to_string();
-
-    returnVal
+    String::from_utf8(command.wait_with_output().unwrap().stdout).unwrap()
 }
