@@ -4,8 +4,9 @@
 use std::{env, fs, io};
 use std::env::set_current_dir;
 use std::fs::File;
-use std::io::{Write};
-use std::process::{ Command, Output};
+use std::io::{Read, Stdin, Stdout, Write};
+use std::os::fd::AsRawFd;
+use std::process::{Command, Output, Stdio};
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -28,19 +29,14 @@ fn main () {
                 if !pipe {
                     let command = processes[0].0.clone();
                     let args = processes[0].1.clone();
-                    print!("{}", executeCommand(command, args, pipe));
+                    if !builtIns(command.clone(), args.clone()) {
+                        print!("{}", executeCommand(command, args));
+                    }
                 } else {
                     let mut output = String::new();
-                    let mut file = File::create("/tmp/conchOutput.txt").unwrap();
-                    file.set_len(0).unwrap();
-                    for (command, mut args) in processes {
-                        if !output.is_empty() {
-                            args.push("/tmp/conchOutput.txt".to_string());
-                        }
-                        output = executeCommand(command, args, pipe);
-                        file.write_all(output.as_bytes()).unwrap();
+                    for (command, args) in processes {
+                        output = executeCommandPipe(command, args, output);
                     }
-                    fs::remove_file("/tmp/conchOutput.txt").unwrap();
                     print!("{}", output);
                 }
             }
@@ -109,11 +105,12 @@ fn parse (input: String, pipe: &mut bool) -> Vec<(String, Vec<String>)>  {
     process.push((command.trim().to_string(), arguments));
     process
 }
-fn executeCommand (command: String, args: Vec<String>, pipe : bool) -> String {
+
+fn builtIns (command: String, args : Vec<String>) -> bool {
     match command.as_str() {
         "cd" => {
             if args.len() > 1 {
-                return "Too many arguments\n".to_string();
+                println!("Too many arguments");
             } else if args.len() == 0 {
                 set_current_dir(env::home_dir().unwrap()).unwrap();
             } else {
@@ -123,10 +120,11 @@ fn executeCommand (command: String, args: Vec<String>, pipe : bool) -> String {
                     set_current_dir(newDir).unwrap();
                 }
             }
+            true
         },
         "exit" => {
             if args.len() > 1 {
-                return "Too many arguments\n".to_string();
+                println!("Too many arguments");
             } else if args.len() == 0 {
                 std::process::exit(0);
             } else {
@@ -135,31 +133,45 @@ fn executeCommand (command: String, args: Vec<String>, pipe : bool) -> String {
                         std::process::exit(args[0].parse::<i32>().unwrap());
                     },
                     Err(_) => {
-                        return "Invalid argument: ".to_string() + &args[0] + "\n";
+                        println!("Invalid argument: {}", args[0]);
                     }
                 }
             }
+            true
         },
         _ => {
-            if !pipe {
-                let spawn = Command::new(command).args(args).spawn();
-                let output: Output;
-                return match spawn {
-                    Ok(..) => {
-                        output = spawn.unwrap().wait_with_output().unwrap();
-                        String::from_utf8(output.stdout).unwrap()
-                    },
-                    Err(..) => {
-                        spawn.unwrap_err().to_string() + "\n"
-                    }
-                }
-            }
-            let output = Command::new(command).args(args).output();
-            return str::from_utf8(&*match output {
-                Ok(..) => {output.unwrap().stdout},
-                Err(..) => { Vec::from("The command you entered was not valid\n") }
-            }).unwrap().to_string();
+            false
         }
     }
-    "".to_string()
+}
+fn executeCommand (command: String, args: Vec<String>) -> String {
+    let spawn = Command::new(command).args(args).spawn();
+    let output: Output;
+    match spawn {
+        Ok(..) => {
+            output = spawn.unwrap().wait_with_output().unwrap();
+            String::from_utf8(output.stdout).unwrap()
+        },
+        Err(..) => {
+            spawn.unwrap_err().to_string()
+        }
+    }
+}
+
+fn executeCommandPipe (command: String, args : Vec<String>, prevStdin: String) -> String {
+    let command = Command::new(command.clone()).args(args.clone()).stdout(Stdio::piped()).stdin(Stdio::piped()).spawn();
+    let mut command = match command {
+        Ok(..) => command.unwrap(),
+        Err(..) => return command.unwrap_err().to_string() + "\n",
+    };
+    if !prevStdin.is_empty() {
+        let mut stdin = command.stdin.take().unwrap();
+        stdin.write_all(prevStdin.as_bytes()).unwrap();
+    }
+
+    let mut returnVal = String::new();
+
+    command.stdout.unwrap().read_to_string(&mut returnVal).unwrap().to_string();
+
+    returnVal
 }
