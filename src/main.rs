@@ -1,10 +1,12 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env, io};
+use std::{env, io, thread};
 use std::env::set_current_dir;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Output, Stdio};
+use std::fs::File;
+use std::io::{stdout, BufRead, BufReader, Read, Stderr, Stdin, Stdout, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::thread::spawn;
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -24,27 +26,39 @@ fn main () {
                 let processes = parse(input, &mut piped);
                 input = String::new();
 
-                if !piped {
-                    let mut output = String::new();
-                    let mut error = String::new();
-                    let (command, args) = processes[0].clone();
-                    if !builtIns(command.clone(), args.clone(), &mut output, &mut error) {
-                        executeCommand(command, args, &mut output, &mut error);
-                    }
-                    print!("{}", output);
-                    print!("{}", error);
-                }
-                else {
-                    let mut output = String::new();
-                    let mut error = String::new();
+                let mut first = true;
+                let mut last = false;
 
-                    for (command, args) in processes.iter() {
-                        if !builtIns(command.clone(), args.clone(), &mut output, &mut error) {
-                            executeCommandPiped(command.clone(), args.clone(), &mut output, &mut error);
+                let mut children = Vec::new();
+                let processLen = processes.len();
+
+                for (i, (command, args, mode)) in processes.into_iter().enumerate() {
+                    let mut error = String::new();
+                    if i == processLen - 1 {
+                        last = true;
+                    }
+                    let mut child;
+                    if first {
+                        child = buildCommand(command, args, None, &mut error, first, last);
+                    }
+                    else {
+                        let prevChild: &mut Child = &mut children.last_mut().unwrap();
+                        let prevStdout = prevChild.stdout.take().unwrap();
+                        child = buildCommand(command, args, Option::from(prevStdout), &mut error, first, last);
+                    }
+                    match child {
+                        Some(child) => {
+                            children.push(child);
+                        },
+                        None => {
+                            eprintln!("{}", error);
                         }
                     }
-                    print!("{}", output);
-                    print!("{}", error);
+                    first = false;
+                }
+
+                for mut child in children {
+                    child.wait().unwrap();
                 }
             }
             Err(_) => {
@@ -54,13 +68,15 @@ fn main () {
     }
 }
 
-fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>)>  {
+fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>, ([i32; 2], [String; 2]))>  {
     let mut command = String::new();
     let mut arguments = Vec::new();
     let mut argument = String::new();
+    let mode = [0, 0];
+    let file = [String::new(), String::new()];
     let mut commandFound = false;
     let mut string = false;
-    let mut process: Vec<(String, Vec<String>)> = Vec::new();
+    let mut processes: Vec<(String, Vec<String>, ([i32; 2], [String; 2]))> = Vec::new();
     *piped = false;
 
     for character in input.chars() {
@@ -73,11 +89,11 @@ fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>)>  {
             }
         }
         else {
-            if character == "'".chars().nth(0).unwrap() {
+            if character == "'".chars().nth(0).unwrap() || character == '"' {
                 string = !string;
             }
             else if character == '|'{
-                process.push((command.trim().to_string(), arguments));
+                processes.push((command.trim().to_string(), arguments, (mode, file.clone())));
                 commandFound = false;
                 command = String::new();
                 argument = String::new();
@@ -96,22 +112,67 @@ fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>)>  {
     if argument.len() > 0 {
         arguments.push(argument);
     }
-    let mut argumentPush = Vec::new();
-    for argument in arguments.iter_mut() {
-        if argument.len() > 1 {
-            if argument.chars().nth(0).unwrap() == '-' && argument.chars().nth(1).unwrap() != '-' && argument.len() > 1 {
-                for _ in 0..argument.len() - 2 {
-                    argumentPush.push("-".to_string() + &argument.chars().nth(1).unwrap().to_string());
-                    argument.remove(1);
+    processes.push((command.trim().to_string(), arguments, (mode, file)));
+
+
+    for process in processes.iter_mut() {
+        let mut argumentPush = Vec::new();
+        let mut file = 0;
+        let mut removeArg = Vec::new();
+        for argument in process.1.iter_mut() {
+            match argument.as_str() {
+                ">" => {
+                    file = 1;
+                    process.2.0[0] = 1
+                },
+                ">>" => {
+                    file = 1;
+                    process.2.0[0] = 2
+                },
+                "<" => {
+                    file = 2;
+                    process.2.0[1] = 1
+                },
+                _ => {
+                    if file != 0 {
+                        if file == 1 {
+                            process.2.1[0] = argument.clone();
+                        }
+                        else {
+                            process.2.1[1] = argument.clone();
+                        }
+                        removeArg.push(argument.clone());
+                    }
+                    else if argument.len() > 1 {
+                        if argument.chars().nth(0).unwrap() == '-' && argument.chars().nth(1).unwrap() != '-' && argument.len() > 1 {
+                            for _ in 0..argument.len() - 2 {
+                                argumentPush.push("-".to_string() + &argument.chars().nth(1).unwrap().to_string());
+                                argument.remove(1);
+                            }
+                        }
+                    }
                 }
             }
         }
+        for arg in removeArg {
+            let pos = process.1.iter().position(|x| x == &arg).unwrap();
+            process.1.remove(pos);
+        }
+        let mut removals = 0;
+        const REDIRECTIONS: [&str; 3] = [">" , ">>" , "<" ];
+        for argument in process.1.iter() {
+            if REDIRECTIONS.contains(&argument.as_str()) {
+                removals += 1;
+            }
+        }
+        for _ in 0..removals {
+            let pos = process.1.iter().position(|x| REDIRECTIONS.contains(&&**x)).unwrap();
+            process.1.remove(pos);
+        }
+        process.1.append(&mut argumentPush);
     }
 
-    arguments.append(&mut argumentPush);
-
-    process.push((command.trim().to_string(), arguments));
-    process
+    processes
 }
 
 fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error: &mut String) -> bool{
@@ -153,82 +214,29 @@ fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error:
     }
 }
 
-fn executeCommand (command: String, args : Vec<String>, stdOutput: &mut String, error: &mut String) {
-    let spawn = Command::new(command).args(args).spawn();
-    let output: Output;
-    match spawn {
-        Ok(..) => {
-            output = spawn.unwrap().wait_with_output().unwrap();
-            *stdOutput = String::from_utf8(output.stdout).unwrap();
-        },
-        Err(..) => {
-            *error = spawn.unwrap_err().to_string();
-        }
-    }
-}
 
-fn executeCommandPiped (command: String, args : Vec<String>, prevStdin: &mut String, error: &mut String) {
-    let command = Command::new(command.clone()).args(args.clone()).stdout(Stdio::piped()).stdin(Stdio::piped()).stderr(Stdio::piped()).spawn();
-    let mut command = match command {
-        Ok(command) => command,
-        Err(..) => {*error = command.unwrap_err().to_string() + "\n";
-        return;},
+fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<ChildStdout>, error: &mut String, first: bool, last: bool) -> Option<Child> {
+    let mut commandResult = Command::new(command);
+    commandResult.args(args);
+    if first {
+        commandResult.stdin(Stdio::inherit());
+    } else {
+        commandResult.stdin(Stdio::from(prevStdin.unwrap()));
+    }
+
+    if last {
+        commandResult.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
+    else {
+        commandResult.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let result = commandResult.spawn();
+
+    let command;
+    match result {
+        Ok(child) => command = child,
+        Err(..) => {*error = result.unwrap_err().to_string() + "\n";
+            return None},
     };
-
-    let stdout = command.stdout.take().unwrap();
-    let stderr = command.stderr.take().unwrap();
-
-    let outThread = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        let mut output: String = String::new();
-
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-                Err(..) => {
-                    eprintln!("Error reading stdout");
-                }
-            }
-        }
-        return output;
-    });
-
-    let errThread = std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut output: String = String::new();
-
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-                Err(..) => {
-                    eprintln!("Error reading stdout");
-                }
-            }
-        }
-        return output;
-    });
-
-    let mut stdin = command.stdin.take().unwrap();
-
-    if !prevStdin.is_empty() {
-        stdin.write_all(prevStdin.as_bytes()).unwrap();
-        stdin.flush().unwrap();
-        drop(stdin);
-    }
-
-    let status = command.wait().unwrap();
-    if !status.success() {
-        eprintln!("{}", status);
-    }
-
-
-    *prevStdin = outThread.join().unwrap();
-    *error = errThread.join().unwrap();
-
+    Some(command)
 }
