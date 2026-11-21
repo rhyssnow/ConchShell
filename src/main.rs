@@ -1,12 +1,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env, io, thread};
+use std::{env, fs, io};
 use std::env::set_current_dir;
-use std::fs::File;
-use std::io::{stdout, BufRead, BufReader, Read, Stderr, Stdin, Stdout, Write};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
-use std::thread::spawn;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdout, Command, Stdio};
 
 fn main () {
     set_current_dir(env::home_dir().unwrap()).unwrap();
@@ -29,36 +28,80 @@ fn main () {
                 let mut first = true;
                 let mut last = false;
 
+
                 let mut children = Vec::new();
                 let processLen = processes.len();
+                let mut tmpfiles = Vec::new();
 
                 for (i, (command, args, mode)) in processes.into_iter().enumerate() {
                     let mut error = String::new();
-                    if i == processLen - 1 {
-                        last = true;
-                    }
-                    let mut child;
-                    if first {
-                        child = buildCommand(command, args, None, &mut error, first, last);
+                    if !builtIns(command.clone(), args.clone(), &mut error) {
+                        let mut error = String::new();
+                        if i == processLen - 1 {
+                            last = true;
+                        }
+                        let mut prevStdout;
+                        if first {
+                            prevStdout = Option::from(None);
+                        }
+                        else {
+                            let prevChild: &mut Child = &mut children.last_mut().unwrap();
+                            prevStdout = Option::from(Stdio::from(prevChild.stdout.take().unwrap()));
+                        }
+                        let mut stdout: Option<Stdio> = Option::from(None);
+                        match mode.0[1] {
+                            1 => {
+                                match File::open(mode.1[1].clone()) {
+                                    Ok(file) => {
+                                        stdout = Option::from(Stdio::from(file));
+                                        first = false;
+                                    },
+                                    Err(_) => {
+                                        eprintln!("Error opening file: {}", mode.1[1]);
+                                        continue;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        match mode.0[0] {
+                            1  => {
+                                let file = File::create(mode.1[0].clone()).unwrap();
+                                stdout = Option::from(Stdio::from(file));
+                                last = false;
+                            }
+                            2 => {
+                                let file = File::create("/tmp/tmpfile".to_string() + &tmpfiles.len().to_string() + ".txt").unwrap();
+                                stdout = Option::from(Stdio::from(file));
+                                tmpfiles.push(("/tmp/tmpfile".to_string() + &tmpfiles.len().to_string() + ".txt", mode.1[0].clone()));
+                                last = false;
+                            }
+                            _ => {}
+                        }
+                        let child = buildCommand(command, args, prevStdout, stdout, &mut error, first, last);
+                        match child {
+                            Some(child) => {
+                                children.push(child);
+                            },
+                            None => {
+                                eprintln!("{}", error);
+                            }
+                        }
+                        first = false;
                     }
                     else {
-                        let prevChild: &mut Child = &mut children.last_mut().unwrap();
-                        let prevStdout = prevChild.stdout.take().unwrap();
-                        child = buildCommand(command, args, Option::from(prevStdout), &mut error, first, last);
+                        eprint!("{}", error);
                     }
-                    match child {
-                        Some(child) => {
-                            children.push(child);
-                        },
-                        None => {
-                            eprintln!("{}", error);
-                        }
-                    }
-                    first = false;
                 }
 
                 for mut child in children {
                     child.wait().unwrap();
+                }
+
+                for (tmpfile, fileLocation) in tmpfiles {
+                    let mut file = OpenOptions::new().append(true).open(fileLocation).unwrap();
+                    file.write_all(fs::read_to_string(&tmpfile).unwrap().as_bytes()).unwrap();
+                    fs::remove_file(tmpfile).unwrap();
                 }
             }
             Err(_) => {
@@ -175,11 +218,11 @@ fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>, ([i32; 2
     processes
 }
 
-fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error: &mut String) -> bool{
+fn builtIns (command: String, args : Vec<String>, error: &mut String) -> bool{
     match command.as_str() {
         "cd" => {
             if args.len() > 1 {
-                *error = "Too many arguments".to_string();
+                *error = "Too many arguments\n".to_string();
             } else if args.len() == 0 {
                 set_current_dir(env::home_dir().unwrap()).unwrap();
             } else {
@@ -188,12 +231,15 @@ fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error:
                 if newDir.exists() {
                     set_current_dir(newDir).unwrap();
                 }
+                else {
+                    *error = "No such directory\n".to_string();
+                }
             }
             true
         },
         "exit" => {
             if args.len() > 1 {
-                *error = "Too many arguments".to_string();
+                *error = "Too many arguments\n".to_string();
             } else if args.len() == 0 {
                 std::process::exit(0);
             } else {
@@ -202,7 +248,7 @@ fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error:
                         std::process::exit(args[0].parse::<i32>().unwrap());
                     },
                     Err(_) => {
-                        *error = "Invalid argumend: ".to_string()+ args[0].as_str();
+                        *error = "Invalid argumend: ".to_string()+ args[0].as_str()+"\n";
                     }
                 }
             }
@@ -215,13 +261,13 @@ fn builtIns (command: String, args : Vec<String>, stdOutput: &mut String, error:
 }
 
 
-fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<ChildStdout>, error: &mut String, first: bool, last: bool) -> Option<Child> {
+fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, file: Option<Stdio>, error: &mut String, first: bool, last: bool) -> Option<Child> {
     let mut commandResult = Command::new(command);
     commandResult.args(args);
     if first {
         commandResult.stdin(Stdio::inherit());
     } else {
-        commandResult.stdin(Stdio::from(prevStdin.unwrap()));
+        commandResult.stdin(prevStdin.unwrap());
     }
 
     if last {
@@ -229,6 +275,9 @@ fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<ChildStd
     }
     else {
         commandResult.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    if file.is_some() {
+        commandResult.stdout(file.unwrap());
     }
     let result = commandResult.spawn();
 
