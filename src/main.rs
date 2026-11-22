@@ -1,29 +1,35 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env, fs, io};
+use std::{env, io};
 use std::env::set_current_dir;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::io::{Write};
+use std::process::{Child, Command, Stdio};
+use rustyline::{ DefaultEditor,};
+use rustyline::error::ReadlineError;
+use std::os::unix::process::CommandExt;
 
 fn main () {
-    set_current_dir(env::home_dir().unwrap()).unwrap();
-    let mut input = String::new();
+    let mut rl = DefaultEditor::new().unwrap();
+    let shellPgid = unsafe { libc::getpgrp()};
+    unsafe {
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+    }
+
 
     loop {
         print!("{} > ", env::current_dir().unwrap().display());
         io::stdout().flush().unwrap();
 
-        input.clear();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
+        let input = rl.readline(&(env::current_dir().unwrap().display().to_string() + " > "));
+        match input  {
+            Ok(mut input) => {
                 input = input.trim().to_string();
 
                 let mut piped = false;
 
                 let processes = parse(input, &mut piped);
-                input = String::new();
 
                 let mut first = true;
                 let mut last = false;
@@ -31,6 +37,8 @@ fn main () {
 
                 let mut children = Vec::new();
                 let processLen = processes.len();
+
+                let mut pgid: Option<i32> = None;
 
                 for (i, (command, args, mut mode)) in processes.into_iter().enumerate() {
                     let mut error = String::new();
@@ -99,9 +107,12 @@ fn main () {
                             }
                             _ => {}
                         }
-                        let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, first, last);
+                        let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, first, last, pgid);
                         match child {
                             Some(child) => {
+                                if pgid.is_none() {
+                                    pgid = Some(child.id() as i32);
+                                }
                                 children.push(child);
                             },
                             None => {
@@ -115,9 +126,25 @@ fn main () {
                     }
                 }
 
+                if let Some(pgid) = pgid {
+                    unsafe {
+                        libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
+                    }
+                }
+
                 for mut child in children {
                     child.wait().unwrap();
                 }
+
+                unsafe {
+                    libc::tcsetpgrp(libc::STDIN_FILENO, shellPgid);
+                }
+            }
+            Err(ReadlineError::Interrupted) => {
+                continue
+            }
+            Err(ReadlineError::Eof) => {
+                break
             }
             Err(_) => {
                 print!("Error reading input");
@@ -284,7 +311,7 @@ fn builtIns (command: String, args : Vec<String>, error: &mut String) -> bool{
                         std::process::exit(args[0].parse::<i32>().unwrap());
                     },
                     Err(_) => {
-                        *error = "Invalid argumend: ".to_string()+ args[0].as_str()+"\n";
+                        *error = "Invalid argument: ".to_string()+ args[0].as_str()+"\n";
                     }
                 }
             }
@@ -297,8 +324,10 @@ fn builtIns (command: String, args : Vec<String>, error: &mut String) -> bool{
 }
 
 
-fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, fileOut: Option<Stdio>, fileErr: Option<Stdio>, error: &mut String, first: bool, last: bool) -> Option<Child> {
+fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, fileOut: Option<Stdio>, fileErr: Option<Stdio>, error: &mut String, first: bool, last: bool, pgid: Option<i32>) -> Option<Child> {
     let mut commandResult = Command::new(command);
+    commandResult.process_group(pgid.unwrap_or(0));
+
     commandResult.args(args).stderr(Stdio::inherit());
     if first {
         commandResult.stdin(Stdio::inherit());
