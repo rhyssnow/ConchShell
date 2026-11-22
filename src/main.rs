@@ -1,17 +1,19 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env, io};
+use std::{env};
 use std::env::set_current_dir;
 use std::fs::{File, OpenOptions};
-use std::io::{Write};
 use std::process::{Child, Command, Stdio};
 use rustyline::{ DefaultEditor,};
 use rustyline::error::ReadlineError;
 use std::os::unix::process::CommandExt;
+use hostname::get;
+use colored::Colorize;
 
 fn main () {
     let mut rl = DefaultEditor::new().unwrap();
+    let user = env::var("USER").unwrap();
     let shellPgid = unsafe { libc::getpgrp()};
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
@@ -19,10 +21,13 @@ fn main () {
 
 
     loop {
-        print!("{} > ", env::current_dir().unwrap().display());
-        io::stdout().flush().unwrap();
-
-        let input = rl.readline(&(env::current_dir().unwrap().display().to_string() + " > "));
+        println!("{}{}{} {} ",
+                 user.clone().purple().bold(),
+            "@".bold(),
+                 get().unwrap().to_str().unwrap().red().bold(),
+            env::current_dir().unwrap().file_name().unwrap().to_str().unwrap().blue()
+        );
+        let input = rl.readline("   > ");
         match input  {
             Ok(mut input) => {
                 input = input.trim().to_string();
