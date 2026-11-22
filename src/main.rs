@@ -3,143 +3,53 @@
 
 use std::{env};
 use std::env::set_current_dir;
-use std::fs::{File, OpenOptions};
+use std::fs::{ File, OpenOptions, exists};
 use std::process::{Child, Command, Stdio};
-use rustyline::{ DefaultEditor,};
+use rustyline::{Cmd, DefaultEditor, KeyEvent, KeyCode, Modifiers};
 use rustyline::error::ReadlineError;
 use std::os::unix::process::CommandExt;
 use hostname::get;
 use colored::Colorize;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-fn main () {
+fn main (){
     let mut rl = DefaultEditor::new().unwrap();
     let user = env::var("USER").unwrap();
     let shellPgid = unsafe { libc::getpgrp()};
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
     }
+    if !exists(env::home_dir().unwrap().to_str().unwrap().to_string() + "/.conch_history").unwrap() {
+        File::create(env::home_dir().unwrap().to_str().unwrap().to_string() + "/.conch_history").unwrap();
+    }
 
+    rl.bind_sequence(KeyEvent(KeyCode::Up, Modifiers::NONE), Cmd::PreviousHistory);
+    rl.bind_sequence(KeyEvent(KeyCode::Down, Modifiers::NONE), Cmd::NextHistory);
 
-    loop {
+    let historyPath = env::home_dir().unwrap().join(".conch_history");
+
+    rl.load_history(&historyPath).unwrap();
+
+    let term = Arc::new(AtomicBool::new(false));
+    for sig in [signal_hook::consts::SIGHUP, signal_hook::consts::SIGTERM, signal_hook::consts::SIGQUIT] {
+        signal_hook::flag::register(sig, Arc::clone(&term)).unwrap();
+    }
+
+    while !term.load(Ordering::Relaxed) {
         println!("{}{}{} {} ",
                  user.clone().purple().bold(),
             "@".bold(),
                  get().unwrap().to_str().unwrap().red().bold(),
             env::current_dir().unwrap().file_name().unwrap().to_str().unwrap().blue()
         );
+
         let input = rl.readline("   > ");
         match input  {
             Ok(mut input) => {
                 input = input.trim().to_string();
-
-                let mut piped = false;
-
-                let processes = parse(input, &mut piped);
-
-                let mut first = true;
-                let mut last = false;
-
-
-                let mut children = Vec::new();
-                let processLen = processes.len();
-
-                let mut pgid: Option<i32> = None;
-
-                for (i, (command, args, mut mode)) in processes.into_iter().enumerate() {
-                    let mut error = String::new();
-                    if !builtIns(command.clone(), args.clone(), &mut error) {
-                        let mut error = String::new();
-                        if i == processLen - 1 {
-                            last = true;
-                        }
-                        let prevStdout;
-                        if first {
-                            prevStdout = Option::from(None);
-                        }
-                        else {
-                            let prevChild: &mut Child = &mut children.last_mut().unwrap();
-                            prevStdout = Option::from(Stdio::from(prevChild.stdout.take().unwrap()));
-                        }
-                        let mut stdout: Option<Stdio> = Option::from(None);
-                        let mut stderr: Option<Stdio> = Option::from(None);
-                        match mode.0[1] {
-                            1 => {
-                                match File::open(mode.1[1].clone()) {
-                                    Ok(file) => {
-                                        stdout = Option::from(Stdio::from(file));
-                                        first = false;
-                                    },
-                                    Err(_) => {
-                                        eprintln!("Error opening file: {}", mode.1[1]);
-                                        continue;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        match mode.0[3] {
-                            1 => {
-                                mode.1[2] = mode.1[0].clone();
-                                mode.0[2] = mode.0[0].clone();
-                            },
-                            2 => {
-                                mode.1[0] = mode.1[2].clone();
-                                mode.0[0] = mode.0[2].clone();
-                            },
-                            _ => {}
-                        }
-                        match mode.0[2] {
-                            1  => {
-                                let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
-                                file.set_len(0).unwrap();
-                                stderr = Option::from(Stdio::from(file));
-                            }
-                            2 => {
-                                let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
-                                stderr = Option::from(Stdio::from(file));
-                            }
-                            _ => {}
-                        }
-                        match mode.0[0] {
-                            1  => {
-                                let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
-                                file.set_len(0).unwrap();
-                                stdout = Option::from(Stdio::from(file));
-                            }
-                            2 => {
-                                let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
-                                stdout = Option::from(Stdio::from(file));
-                            }
-                            _ => {}
-                        }
-                        let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, first, last, pgid);
-                        match child {
-                            Some(child) => {
-                                if pgid.is_none() {
-                                    pgid = Some(child.id() as i32);
-                                }
-                                children.push(child);
-                            },
-                            None => {
-                                eprintln!("{}", error);
-                            }
-                        }
-                        first = false;
-                    }
-                    else {
-                        eprint!("{}", error);
-                    }
-                }
-
-                if let Some(pgid) = pgid {
-                    unsafe {
-                        libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
-                    }
-                }
-
-                for mut child in children {
-                    child.wait().unwrap();
-                }
+                rl.add_history_entry(&input).unwrap();
+                run(input);
 
                 unsafe {
                     libc::tcsetpgrp(libc::STDIN_FILENO, shellPgid);
@@ -155,6 +65,118 @@ fn main () {
                 print!("Error reading input");
             }
         }
+    }
+    rl.save_history(&historyPath).unwrap();
+}
+
+fn run (input: String) {
+    let mut piped = false;
+
+    let processes = parse(input, &mut piped);
+
+    let mut first = true;
+    let mut last = false;
+
+
+    let mut children = Vec::new();
+    let processLen = processes.len();
+
+    let mut pgid: Option<i32> = None;
+
+    for (i, (command, args, mut mode)) in processes.into_iter().enumerate() {
+        let mut error = String::new();
+        if !builtIns(command.clone(), args.clone(), &mut error) {
+            let mut error = String::new();
+            if i == processLen - 1 {
+                last = true;
+            }
+            let prevStdout;
+            if first {
+                prevStdout = Option::from(None);
+            }
+            else {
+                let prevChild: &mut Child = &mut children.last_mut().unwrap();
+                prevStdout = Option::from(Stdio::from(prevChild.stdout.take().unwrap()));
+            }
+            let mut stdout: Option<Stdio> = Option::from(None);
+            let mut stderr: Option<Stdio> = Option::from(None);
+            match mode.0[1] {
+                1 => {
+                    match File::open(mode.1[1].clone()) {
+                        Ok(file) => {
+                            stdout = Option::from(Stdio::from(file));
+                            first = false;
+                        },
+                        Err(_) => {
+                            eprintln!("Error opening file: {}", mode.1[1]);
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            match mode.0[3] {
+                1 => {
+                    mode.1[2] = mode.1[0].clone();
+                    mode.0[2] = mode.0[0].clone();
+                },
+                2 => {
+                    mode.1[0] = mode.1[2].clone();
+                    mode.0[0] = mode.0[2].clone();
+                },
+                _ => {}
+            }
+            match mode.0[2] {
+                1  => {
+                    let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
+                    file.set_len(0).unwrap();
+                    stderr = Option::from(Stdio::from(file));
+                }
+                2 => {
+                    let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
+                    stderr = Option::from(Stdio::from(file));
+                }
+                _ => {}
+            }
+            match mode.0[0] {
+                1  => {
+                    let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
+                    file.set_len(0).unwrap();
+                    stdout = Option::from(Stdio::from(file));
+                }
+                2 => {
+                    let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
+                    stdout = Option::from(Stdio::from(file));
+                }
+                _ => {}
+            }
+            let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, first, last, pgid);
+            match child {
+                Some(child) => {
+                    if pgid.is_none() {
+                        pgid = Some(child.id() as i32);
+                    }
+                    children.push(child);
+                },
+                None => {
+                    eprintln!("{}", error);
+                }
+            }
+            first = false;
+        }
+        else {
+            eprint!("{}", error);
+        }
+    }
+
+    if let Some(pgid) = pgid {
+        unsafe {
+            libc::tcsetpgrp(libc::STDIN_FILENO, pgid);
+        }
+    }
+
+    for mut child in children {
+        child.wait().unwrap();
     }
 }
 
@@ -259,6 +281,17 @@ fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>, ([i32; 4
                                         argument.remove(1);
                                     }
                                 }
+                               else if argument.chars().nth(0).unwrap() == '$' {
+                                   argument.remove(0);
+                                   *argument = match env::var(argument.clone()) {
+                                       Ok(value) => value,
+                                       Err(_) => {
+                                           println!("Error reading argument: {}", argument);
+                                           removeArg.push(argument.clone());
+                                           argument.clone()
+                                       }
+                                   }
+                               }
                            }
                         }
                     }
