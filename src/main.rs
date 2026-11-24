@@ -156,7 +156,7 @@ fn run (input: String) {
                 }
                 _ => {}
             }
-            let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, first, last, pgid);
+            let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, outputDirection, !first, pgid);
             match child {
                 Some(child) => {
                     if pgid.is_none() {
@@ -189,9 +189,7 @@ fn run (input: String) {
 fn parse (input: String) -> Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)>  {
     let mut arguments = Vec::new();
     let mut argument = String::new();
-    let mode = [0, 0, 0, 0];
-    let file = [String::new(), String::new(), String::new()];
-    let mut commandFound = false;
+    let mut commandFound;
     let mut string = false;
     let mut processes: Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)> = Vec::new();
 
@@ -387,23 +385,18 @@ fn builtIns (command: String, args : Vec<String>, error: &mut String) -> bool{
 }
 
 
-fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, fileOut: Option<Stdio>, fileErr: Option<Stdio>, error: &mut String, first: bool, last: bool, pgid: Option<i32>) -> Option<Child> {
+fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, fileOut: Option<Stdio>, fileErr: Option<Stdio>, error: &mut String, mode: String, prevPipe: bool, pgid: Option<i32>) -> Option<Child> {
     let mut commandResult = Command::new(command);
     commandResult.process_group(pgid.unwrap_or(0));
+    commandResult.args(args).stderr(Stdio::inherit()).stdout(Stdio::inherit()).stdin(Stdio::inherit());
 
-    commandResult.args(args).stderr(Stdio::inherit());
-    if first {
-        commandResult.stdin(Stdio::inherit());
-    } else {
+    if mode.as_str() == "pipe" {
+        commandResult.stdout(Stdio::piped());
+    }
+    if prevPipe {
         commandResult.stdin(prevStdin.unwrap());
     }
 
-    if last {
-        commandResult.stdout(Stdio::inherit());
-    }
-    else {
-        commandResult.stdout(Stdio::piped());
-    }
     if fileOut.is_some() {
         commandResult.stdout(fileOut.unwrap());
     }
