@@ -41,7 +41,14 @@ fn main (){
                  user.clone().purple().bold(),
             "@".bold(),
                  get().unwrap().to_str().unwrap().red().bold(),
-            env::current_dir().unwrap().file_name().unwrap().to_str().unwrap().blue()
+            match env::current_dir().unwrap().file_name() {
+                Some(dir) => {
+                    dir.to_str().unwrap().blue()
+                }
+                None => {
+                    "/".blue()
+                }
+            }
         );
 
         let input = rl.readline("   > ");
@@ -70,9 +77,8 @@ fn main (){
 }
 
 fn run (input: String) {
-    let mut piped = false;
 
-    let processes = parse(input, &mut piped);
+    let processes = parse(input);
 
     let mut first = true;
     let mut last = false;
@@ -83,7 +89,7 @@ fn run (input: String) {
 
     let mut pgid: Option<i32> = None;
 
-    for (i, (command, args, mut mode)) in processes.into_iter().enumerate() {
+    for (i, (command, args, mut mode, outputDirection)) in processes.into_iter().enumerate() {
         let mut error = String::new();
         if !builtIns(command.clone(), args.clone(), &mut error) {
             let mut error = String::new();
@@ -180,52 +186,71 @@ fn run (input: String) {
     }
 }
 
-fn parse (input: String, piped: &mut bool) -> Vec<(String, Vec<String>, ([i32; 4], [String; 3]))>  {
-    let mut command = String::new();
+fn parse (input: String) -> Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)>  {
     let mut arguments = Vec::new();
     let mut argument = String::new();
     let mode = [0, 0, 0, 0];
     let file = [String::new(), String::new(), String::new()];
     let mut commandFound = false;
     let mut string = false;
-    let mut processes: Vec<(String, Vec<String>, ([i32; 4], [String; 3]))> = Vec::new();
-    *piped = false;
+    let mut processes: Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)> = Vec::new();
 
     for character in input.chars() {
-        if !commandFound {
-            if character == ' ' && !command.is_empty() {
-                commandFound = true;
-            }
-            else if character != ' ' {
-                command.push(character);
-            }
+        if character == "'".chars().nth(0).unwrap() || character == '"' {
+            string = !string;
         }
-        else {
-            if character == "'".chars().nth(0).unwrap() || character == '"' {
-                string = !string;
-            }
-            else if character == '|'{
-                processes.push((command.trim().to_string(), arguments, (mode, file.clone())));
-                commandFound = false;
-                command = String::new();
-                argument = String::new();
-                arguments = Vec::new();
-                *piped = true;
-            }
-            else if character != ' ' || string {
-                argument.push(character);
-            }
-            else if argument.len() > 0  && !string{
-                arguments.push(argument);
-                argument = String::new();
-            }
+        else if character != ' ' || string {
+            argument.push(character);
+        }
+        else if argument.len() > 0  && !string{
+            arguments.push(argument);
+            argument = String::new();
         }
     }
     if argument.len() > 0 {
         arguments.push(argument);
     }
-    processes.push((command.trim().to_string(), arguments, (mode, file)));
 
+    commandFound = false;
+    let mut newProcess: (String, Vec<String>, ([i32; 4], [String; 3])) = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+
+    for argument in arguments.iter() {
+        if !commandFound {
+            newProcess.0 = argument.clone();
+            commandFound = true;
+        }
+        else {
+            commandFound = false;
+            match argument.as_str() {
+                "|" => {
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "pipe".to_string()));
+                    newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                }
+                "||" => {
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "or".to_string()));
+                    newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                }
+                "&&" => {
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "and".to_string()));
+                    newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                }
+                ";" => {
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "then".to_string()));
+                    newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                }
+                "&" => {
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "background".to_string()));
+                    newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                }
+                _ => {
+                    commandFound = true;
+                    newProcess.1.push(argument.clone());
+                }
+            }
+        }
+    }
+
+    processes.push((newProcess.0, newProcess.1, newProcess.2, "normal".to_string()));
 
     for process in processes.iter_mut() {
         let mut argumentPush = Vec::new();
