@@ -1,7 +1,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::{env};
+use std::{env, thread};
 use std::env::set_current_dir;
 use std::fs::{ File, OpenOptions, exists};
 use std::process::{Child, Command, Stdio};
@@ -80,98 +80,156 @@ fn run (input: String) {
 
     let processes = parse(input);
 
-    let mut first = true;
-    let mut last = false;
-
+    let mut prevPiped = false;
+    let mut execute = true;
 
     let mut children = Vec::new();
-    let processLen = processes.len();
 
     let mut pgid: Option<i32> = None;
 
-    for (i, (command, args, mut mode, outputDirection)) in processes.into_iter().enumerate() {
-        let mut error = String::new();
-        if !builtIns(command.clone(), args.clone(), &mut error) {
+    for (command, args, mut mode, outputDirection, group) in processes.0.into_iter() {
+        if execute {
             let mut error = String::new();
-            if i == processLen - 1 {
-                last = true;
-            }
-            let prevStdout;
-            if first {
-                prevStdout = Option::from(None);
-            }
-            else {
-                let prevChild: &mut Child = &mut children.last_mut().unwrap();
-                prevStdout = Option::from(Stdio::from(prevChild.stdout.take().unwrap()));
-            }
-            let mut stdout: Option<Stdio> = Option::from(None);
-            let mut stderr: Option<Stdio> = Option::from(None);
-            match mode.0[1] {
-                1 => {
-                    match File::open(mode.1[1].clone()) {
-                        Ok(file) => {
-                            stdout = Option::from(Stdio::from(file));
-                            first = false;
-                        },
-                        Err(_) => {
-                            eprintln!("Error opening file: {}", mode.1[1]);
-                            continue;
+            if !builtIns(command.clone(), args.clone(), &mut error) {
+                let mut error = String::new();
+
+                let mut prevStdout;
+                if !prevPiped {
+                    prevStdout = Option::from(None);
+                } else {
+                    let prevChild: &mut Child = &mut children.last_mut().unwrap();
+                    prevStdout = Option::from(Stdio::from(prevChild.stdout.take().unwrap()));
+                }
+                let mut stdout: Option<Stdio> = Option::from(None);
+                let mut stderr: Option<Stdio> = Option::from(None);
+                match mode.0[1] {
+                    1 => {
+                        match File::open(mode.1[1].clone()) {
+                            Ok(file) => {
+                                prevStdout = Option::from(Stdio::from(file));
+                                prevPiped = true;
+                            },
+                            Err(_) => {
+                                eprintln!("Error opening file: {}", mode.1[1]);
+                                continue;
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
-            }
-            match mode.0[3] {
-                1 => {
-                    mode.1[2] = mode.1[0].clone();
-                    mode.0[2] = mode.0[0].clone();
-                },
-                2 => {
-                    mode.1[0] = mode.1[2].clone();
-                    mode.0[0] = mode.0[2].clone();
-                },
-                _ => {}
-            }
-            match mode.0[2] {
-                1  => {
-                    let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
-                    file.set_len(0).unwrap();
-                    stderr = Option::from(Stdio::from(file));
+                match mode.0[3] {
+                    1 => {
+                        mode.1[2] = mode.1[0].clone();
+                        mode.0[2] = mode.0[0].clone();
+                    },
+                    2 => {
+                        mode.1[0] = mode.1[2].clone();
+                        mode.0[0] = mode.0[2].clone();
+                    },
+                    _ => {}
                 }
-                2 => {
-                    let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
-                    stderr = Option::from(Stdio::from(file));
-                }
-                _ => {}
-            }
-            match mode.0[0] {
-                1  => {
-                    let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
-                    file.set_len(0).unwrap();
-                    stdout = Option::from(Stdio::from(file));
-                }
-                2 => {
-                    let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
-                    stdout = Option::from(Stdio::from(file));
-                }
-                _ => {}
-            }
-            let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, outputDirection, !first, pgid);
-            match child {
-                Some(child) => {
-                    if pgid.is_none() {
-                        pgid = Some(child.id() as i32);
+                match mode.0[2] {
+                    1 => {
+                        let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
+                        file.set_len(0).unwrap();
+                        stderr = Option::from(Stdio::from(file));
                     }
-                    children.push(child);
-                },
-                None => {
-                    eprintln!("{}", error);
+                    2 => {
+                        let file = OpenOptions::new().append(true).create(true).open(mode.1[2].clone()).unwrap();
+                        stderr = Option::from(Stdio::from(file));
+                    }
+                    _ => {}
+                }
+                match mode.0[0] {
+                    1 => {
+                        let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
+                        file.set_len(0).unwrap();
+                        stdout = Option::from(Stdio::from(file));
+                    }
+                    2 => {
+                        let file = OpenOptions::new().append(true).create(true).open(mode.1[0].clone()).unwrap();
+                        stdout = Option::from(Stdio::from(file));
+                    }
+                    _ => {}
+                }
+                let child = buildCommand(command, args, prevStdout, stdout, stderr, &mut error, outputDirection.clone(), prevPiped, pgid);
+                match child {
+                    Some(child) => {
+                        if pgid.is_none() {
+                            pgid = Some(child.id() as i32);
+                        }
+                        children.push(child);
+                    },
+                    None => {
+                        eprintln!("{}", error);
+                    }
+                }
+                match outputDirection.as_str() {
+                    "pipe" => {
+                        prevPiped = true;
+                        execute = true;
+                    },
+                    "then" => {
+                        prevPiped = false;
+
+                        children.last_mut().unwrap().wait().unwrap();
+                        children.pop();
+                        pgid = None;
+
+                        execute = true;
+                    },
+                    "or" => {
+                        prevPiped = false;
+
+                        let exitCode = children.last_mut().unwrap().wait().unwrap();
+                        match exitCode.code().unwrap() {
+                            0 => {
+                                execute = false;
+                            }
+                            _ => {
+                                execute = true;
+                                pgid = None;
+                            }
+                        }
+
+                        children.pop();
+                    },
+                    "and" => {
+                        prevPiped = false;
+
+                        let exitCode = children.last_mut().unwrap().wait().unwrap();
+                        match exitCode.code().unwrap() {
+                            0 => {
+                                execute = true;
+                                pgid = None;
+                            }
+                            _ => {
+                                execute = false;
+                            }
+                        }
+
+                        children.pop();
+                    },
+                    "background" => {
+                        prevPiped = false;
+
+                        execute = true;
+
+                        let mut child = children.pop().unwrap();
+                        children.pop();
+                        thread::spawn(move || {
+                           child.wait().unwrap();
+                        });
+                    }
+                    _ => {
+                        prevPiped = false;
+                        execute = true;
+                    }
                 }
             }
-            first = false;
-        }
-        else {
-            eprint!("{}", error);
+            else {
+                eprint!("{}", error);
+            }
         }
     }
 
@@ -186,69 +244,113 @@ fn run (input: String) {
     }
 }
 
-fn parse (input: String) -> Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)>  {
-    let mut arguments = Vec::new();
+fn parse (input: String) -> (Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String, i32)>, Vec<String>, Vec<(i32, ([i32; 4], [String; 3]))>)  {
+    let mut arguments: Vec<(String, i32)> = Vec::new();
     let mut argument = String::new();
     let mut commandFound;
     let mut string = false;
-    let mut processes: Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String)> = Vec::new();
+    let mut subShell = false;
+    let mut processes: Vec<(String, Vec<String>, ([i32; 4], [String; 3]), String, i32)> = Vec::new();
+    let mut subShells: Vec<String> = Vec::new();
+    let mut subshell= String::new();
+    let mut currentGroup = 0;
+    let mut maxGroup = 0;
 
     for character in input.chars() {
-        if character == "'".chars().nth(0).unwrap() || character == '"' {
-            string = !string;
+        if subShell {
+            if character == ')' {
+                subShell = false;
+                subShells.push(subshell);
+                arguments.push(("subshell".to_string(), 0));
+                subshell = String::new();
+                continue
+            }
+            subshell.push(character);
         }
-        else if character != ' ' || string {
-            argument.push(character);
-        }
-        else if argument.len() > 0  && !string{
-            arguments.push(argument);
-            argument = String::new();
+        else {
+            if character == '{' {
+                currentGroup = maxGroup + 1;
+                maxGroup += 1;
+            }
+            else if character == '}'  {
+                arguments.push((argument, currentGroup,));
+                argument = String::new();
+                currentGroup = 0;
+            }
+            else if character == '(' {
+                subShell = true;
+            } else if character == "'".chars().nth(0).unwrap() || character == '"' {
+                string = !string;
+            } else if character != ' ' || string {
+                argument.push(character);
+            } else if argument.len() > 0 && !string {
+                arguments.push((argument, currentGroup));
+                argument = String::new();
+            }
         }
     }
     if argument.len() > 0 {
-        arguments.push(argument);
+        arguments.push((argument, currentGroup));
     }
 
     commandFound = false;
     let mut newProcess: (String, Vec<String>, ([i32; 4], [String; 3])) = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
 
-    for argument in arguments.iter() {
+    let mut prevGroup = 0;
+    let mut inBetween = false;
+    let mut groupThings = Vec::new();
+
+    for argument in arguments.iter_mut() {
         if !commandFound {
-            newProcess.0 = argument.clone();
+            newProcess.0 = argument.clone().0;
+            currentGroup = argument.1;
             commandFound = true;
         }
         else {
             commandFound = false;
-            match argument.as_str() {
+            match argument.0.as_str() {
                 "|" => {
-                    processes.push((newProcess.0, newProcess.1, newProcess.2, "pipe".to_string()));
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "pipe".to_string(), currentGroup));
                     newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                    inBetween = false;
                 }
                 "||" => {
-                    processes.push((newProcess.0, newProcess.1, newProcess.2, "or".to_string()));
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "or".to_string(), currentGroup));
                     newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                    inBetween = false;
                 }
                 "&&" => {
-                    processes.push((newProcess.0, newProcess.1, newProcess.2, "and".to_string()));
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "and".to_string(), currentGroup));
                     newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                    inBetween = false;
                 }
                 ";" => {
-                    processes.push((newProcess.0, newProcess.1, newProcess.2, "then".to_string()));
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "then".to_string(), currentGroup));
                     newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                    inBetween = false;
                 }
                 "&" => {
-                    processes.push((newProcess.0, newProcess.1, newProcess.2, "background".to_string()));
+                    processes.push((newProcess.0, newProcess.1, newProcess.2, "background".to_string(), currentGroup));
                     newProcess = (String::new(), Vec::new(), ([0, 0, 0, 0], [String::new(), String::new(), String::new()]));
+                    inBetween = false;
                 }
                 _ => {
-                    commandFound = true;
-                    newProcess.1.push(argument.clone());
+                    if prevGroup != argument.1 && !commandFound && prevGroup != 0 {
+                        inBetween = true;
+
+                        //put command sorting logic here
+                    }
+                    else if !inBetween {
+                        commandFound = true;
+                        newProcess.1.push(argument.clone().0);
+                    }
                 }
             }
         }
+        prevGroup = argument.1;
     }
 
-    processes.push((newProcess.0, newProcess.1, newProcess.2, "normal".to_string()));
+    processes.push((newProcess.0, newProcess.1, newProcess.2, "normal".to_string(), currentGroup));
 
     for process in processes.iter_mut() {
         let mut argumentPush = Vec::new();
@@ -339,7 +441,7 @@ fn parse (input: String) -> Vec<(String, Vec<String>, ([i32; 4], [String; 3]), S
         process.1.append(&mut argumentPush);
     }
 
-    processes
+    (processes, subShells, groupThings)
 }
 
 fn builtIns (command: String, args : Vec<String>, error: &mut String) -> bool{
@@ -408,7 +510,8 @@ fn buildCommand (command: String, args : Vec<String>, prevStdin: Option<Stdio>, 
     let command;
     match result {
         Ok(child) => command = child,
-        Err(..) => {*error = result.unwrap_err().to_string() + "\n";
+        Err(..) => {
+            *error = result.unwrap_err().to_string() + "\n";
             return None},
     };
     Some(command)
